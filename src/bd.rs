@@ -230,7 +230,7 @@ impl smoltcp::phy::RxToken for RxToken<'_> {
             let len = self.descriptor.data_length.load(Ordering::Relaxed) as usize;
             assert!(len <= self.mtu);
             let ptr = self.descriptor.data_buffer_pointer.load(Ordering::Relaxed) as *mut u8;
-            core::slice::from_raw_parts_mut(ptr, len)
+            core::slice::from_raw_parts(ptr, len)
         };
 
         let result = f(buffer);
