@@ -50,12 +50,35 @@ impl<D, const COUNT: usize, const MTU: usize> IoBuffers<D, COUNT, MTU> {
 
     fn init(
         &'static mut self,
-        init_descriptors: impl Fn(&mut [D], &mut [DataBuffer<MTU>]),
+        init_descriptors: impl for<'a> Fn(&'a mut [D], &'a mut [DataBuffer<MTU>]),
     ) -> IoSlices<'static, D> {
         let ring = &mut self.ring.0;
         let buffers = self.buffers.as_mut_slice();
         init_descriptors(ring, buffers);
-        IoSlices::new(ring, MTU)
+        IoSlices {
+            ring,
+            mtu: MTU,
+            index: 0,
+        }
+    }
+}
+
+fn init_tx_bds<'a, const MTU: usize>(
+    descriptors: &'a mut [txbd::TxBD],
+    buffers: &'a mut [DataBuffer<MTU>],
+) {
+    for (descriptor, buffer) in descriptors.iter_mut().zip(buffers.iter_mut()) {
+        descriptor
+            .data_buffer_pointer
+            .store(buffer.0.as_mut_ptr() as _, Ordering::SeqCst);
+    }
+
+    // When the DMA engine reaches this descriptor, it needs to wrap
+    // around to the first descriptor.
+    if let Some(descriptor) = descriptors.last_mut() {
+        descriptor
+            .flags
+            .fetch_or(txbd::FLAGS_WRAP, Ordering::SeqCst);
     }
 }
 
@@ -67,21 +90,28 @@ impl<const COUNT: usize, const MTU: usize> IoBuffers<txbd::TxBD, COUNT, MTU> {
 
     /// Take the buffers and represent them as slices.
     pub fn take(&'static mut self) -> IoSlices<'static, txbd::TxBD> {
-        self.init(|descriptors, buffers| {
-            for (descriptor, buffer) in descriptors.iter_mut().zip(buffers.iter_mut()) {
-                descriptor
-                    .data_buffer_pointer
-                    .store(buffer.0.as_mut_ptr() as _, Ordering::SeqCst);
-            }
+        self.init(init_tx_bds)
+    }
+}
 
-            // When the DMA engine reaches this descriptor, it needs to wrap
-            // around to the first descriptor.
-            if let Some(descriptor) = descriptors.last_mut() {
-                descriptor
-                    .flags
-                    .fetch_or(txbd::FLAGS_WRAP, Ordering::SeqCst);
-            }
-        })
+fn init_rx_bds<'a, const MTU: usize>(
+    descriptors: &'a mut [rxbd::RxBD],
+    buffers: &'a mut [DataBuffer<MTU>],
+) {
+    for (descriptor, buffer) in descriptors.iter_mut().zip(buffers.iter_mut()) {
+        descriptor
+            .data_buffer_pointer
+            .store(buffer.0.as_mut_ptr() as _, Ordering::Relaxed);
+        // Zero all other flags.
+        descriptor.flags.store(rxbd::FLAGS_EMPTY, Ordering::SeqCst);
+    }
+
+    // When the DMA engine reaches this descriptor, it needs to wrap
+    // around to the first descriptor.
+    if let Some(descriptor) = descriptors.last_mut() {
+        descriptor
+            .flags
+            .fetch_or(rxbd::FLAGS_WRAP, Ordering::SeqCst);
     }
 }
 
@@ -93,23 +123,7 @@ impl<const COUNT: usize, const MTU: usize> IoBuffers<rxbd::RxBD, COUNT, MTU> {
 
     /// Take the buffers and represent them as slices.
     pub fn take(&'static mut self) -> IoSlices<'static, rxbd::RxBD> {
-        self.init(|descriptors, buffers| {
-            for (descriptor, buffer) in descriptors.iter_mut().zip(buffers.iter_mut()) {
-                descriptor
-                    .data_buffer_pointer
-                    .store(buffer.0.as_mut_ptr() as _, Ordering::Relaxed);
-                // Zero all other flags.
-                descriptor.flags.store(rxbd::FLAGS_EMPTY, Ordering::SeqCst);
-            }
-
-            // When the DMA engine reaches this descriptor, it needs to wrap
-            // around to the first descriptor.
-            if let Some(descriptor) = descriptors.last_mut() {
-                descriptor
-                    .flags
-                    .fetch_or(rxbd::FLAGS_WRAP, Ordering::SeqCst);
-            }
-        })
+        self.init(init_rx_bds)
     }
 }
 
@@ -126,13 +140,6 @@ pub type ReceiveSlices<'a> = IoSlices<'a, rxbd::RxBD>;
 pub type TransmitSlices<'a> = IoSlices<'a, txbd::TxBD>;
 
 impl<'a, D> IoSlices<'a, D> {
-    fn new(ring: &'a mut [D], mtu: usize) -> Self {
-        Self {
-            ring,
-            mtu,
-            index: 0,
-        }
-    }
     pub(crate) fn as_ptr(&self) -> *const D {
         self.ring.as_ptr()
     }
