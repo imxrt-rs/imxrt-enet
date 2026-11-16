@@ -78,6 +78,41 @@
 //! // Use the interface with smoltcp.
 //! # Some(())})();
 //! ```
+//!
+//! ## Separate descriptor and buffer allocations
+//!
+//! Use [`ReceiveSlices::new`] and [`TransmitSlices::new`] to control where your
+//! Ethernet frame buffers & DMA descriptors are allocated.
+//!
+//! ```rust,no_run
+//! use static_cell::ConstStaticCell;
+//! use imxrt_enet::{
+//!     DataBuffer, Enet, ReceiveDescriptors, ReceiveSlices, TransmitDescriptors,
+//!     TransmitSlices,
+//! };
+//!
+//! const COUNT: usize = 4;
+//! const MTU: usize = 1536;
+//!
+//! static RX_DESCRIPTORS: ConstStaticCell<ReceiveDescriptors<COUNT>> =
+//!     ConstStaticCell::new(ReceiveDescriptors::new());
+//! static RX_BUFFERS: ConstStaticCell<[DataBuffer<MTU>; COUNT]> =
+//!     ConstStaticCell::new([const { DataBuffer::new() }; COUNT]);
+//!
+//! static TX_DESCRIPTORS: ConstStaticCell<TransmitDescriptors<COUNT>> =
+//!     ConstStaticCell::new(TransmitDescriptors::new());
+//! static TX_BUFFERS: ConstStaticCell<[DataBuffer<MTU>; COUNT]> =
+//!     ConstStaticCell::new([const { DataBuffer::new() }; COUNT]);
+//!
+//! # const MAC: [u8; 6] = [6, 5, 4, 3, 2, 1];
+//! # const SOURCE_CLK_HZ: u32 = 50_000_000;
+//! # let enet = unsafe { imxrt_ral::enet::ENET1::instance() };
+//! let rx_slices = ReceiveSlices::new(RX_DESCRIPTORS.take(), RX_BUFFERS.take());
+//! let tx_slices = TransmitSlices::new(TX_DESCRIPTORS.take(), TX_BUFFERS.take());
+//!
+//! let mut enet = Enet::new(enet, tx_slices, rx_slices, SOURCE_CLK_HZ, &MAC);
+//! // See previous example for enet driver usage.
+//! ```
 
 #![cfg_attr(all(target_arch = "arm", target_os = "none"), no_std)]
 #![warn(
@@ -89,7 +124,10 @@
 
 mod bd;
 
-pub use bd::{IoBuffers, IoSlices, ReceiveBuffers, ReceiveSlices, TransmitBuffers, TransmitSlices};
+pub use bd::{
+    DataBuffer, DescriptorRing, IoBuffers, IoSlices, ReceiveBuffers, ReceiveDescriptors,
+    ReceiveSlices, TransmitBuffers, TransmitDescriptors, TransmitSlices,
+};
 use imxrt_ral as ral;
 
 pub use mdio::miim::{Read as MiimRead, Write as MiimWrite};
@@ -183,7 +221,7 @@ impl Enet {
         // The maximum receive buffer size includes four low bits of the register.
         // The user's buffer needs to be a non-zero multiple of 16 to account for
         // those extra bytes. We double-check this by asserting the requirement at
-        // compile time in the IoBuffer types.
+        // compile time in the IoBuffer types and in ReceiveSlices::new.
         debug_assert!(rx_ring.mtu() != 0 && rx_ring.mtu() & 0xF == 0);
         ral::write_reg!(ral::enet, enet, MRBR, R_BUF_SIZE: (rx_ring.mtu() >> 4) as u32);
 

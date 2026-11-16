@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+Expose the `TransmitSlices`, `ReceiveSlices`, and related data types through the
+public interface. Use these to control descriptor and data buffer allocations.
+
 ## 0.1.0 - 2026-03-22
 
 First release to crates.io. Supports

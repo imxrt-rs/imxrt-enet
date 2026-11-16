@@ -13,11 +13,47 @@ pub(crate) mod txbd;
 
 use core::sync::atomic::Ordering;
 
+/// An allocation for transmit and receive descriptors.
 #[repr(align(64))]
-struct DescriptorRing<D, const N: usize>([D; N]);
+pub struct DescriptorRing<D, const N: usize>([D; N]);
 
+/// A ring of `N` receive descriptors.
+pub type ReceiveDescriptors<const N: usize> = DescriptorRing<rxbd::RxBD, N>;
+/// A ring of `N` transmit descriptors.
+pub type TransmitDescriptors<const N: usize> = DescriptorRing<txbd::TxBD, N>;
+
+impl<const N: usize> DescriptorRing<rxbd::RxBD, N> {
+    /// Allocate a ring of receive descriptors.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self([const { rxbd::RxBD::zero() }; N])
+    }
+}
+
+impl<const N: usize> DescriptorRing<txbd::TxBD, N> {
+    /// Allocate a ring of transmit descriptors.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self([const { txbd::TxBD::zero() }; N])
+    }
+}
+
+/// An allocation for a single Ethernet frame buffer.
+///
+/// `MTU` is the maximum transmission unit, or the most
+/// number of bytes that this single Ethernet frame could
+/// send. Usually, you'll place each `DataBuffer` in an
+/// array.
 #[repr(align(64))]
-struct DataBuffer<const N: usize>([u8; N]);
+pub struct DataBuffer<const MTU: usize>([u8; MTU]);
+
+impl<const MTU: usize> DataBuffer<MTU> {
+    /// Allocate a single Ethernet frame buffer.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self([0_u8; MTU])
+    }
+}
 
 /// Buffers for Ethernet frames.
 ///
@@ -45,20 +81,6 @@ impl<D, const COUNT: usize, const MTU: usize> IoBuffers<D, COUNT, MTU> {
         Self {
             ring,
             buffers: [const { DataBuffer([0; MTU]) }; COUNT],
-        }
-    }
-
-    fn init(
-        &'static mut self,
-        init_descriptors: impl for<'a> Fn(&'a mut [D], &'a mut [DataBuffer<MTU>]),
-    ) -> IoSlices<'static, D> {
-        let ring = &mut self.ring.0;
-        let buffers = self.buffers.as_mut_slice();
-        init_descriptors(ring, buffers);
-        IoSlices {
-            ring,
-            mtu: MTU,
-            index: 0,
         }
     }
 }
@@ -90,7 +112,7 @@ impl<const COUNT: usize, const MTU: usize> IoBuffers<txbd::TxBD, COUNT, MTU> {
 
     /// Take the buffers and represent them as slices.
     pub fn take(&'static mut self) -> IoSlices<'static, txbd::TxBD> {
-        self.init(init_tx_bds)
+        TransmitSlices::new(&mut self.ring, &mut self.buffers)
     }
 }
 
@@ -123,7 +145,7 @@ impl<const COUNT: usize, const MTU: usize> IoBuffers<rxbd::RxBD, COUNT, MTU> {
 
     /// Take the buffers and represent them as slices.
     pub fn take(&'static mut self) -> IoSlices<'static, rxbd::RxBD> {
-        self.init(init_rx_bds)
+        ReceiveSlices::new(&mut self.ring, &mut self.buffers)
     }
 }
 
@@ -184,9 +206,47 @@ pub struct IoToken<'a, D, R> {
 pub type TxToken<'a> = IoToken<'a, txbd::TxBD, crate::TxReady<'a>>;
 pub type RxToken<'a> = IoToken<'a, rxbd::RxBD, crate::RxReady<'a>>;
 
+impl<'a> ReceiveSlices<'a> {
+    /// Pair a descriptor ring with buffers for receiving data.
+    #[must_use]
+    pub fn new<const N: usize, const MTU: usize>(
+        descriptors: &'a mut DescriptorRing<rxbd::RxBD, N>,
+        buffers: &'a mut [DataBuffer<MTU>; N],
+    ) -> Self {
+        const {
+            assert!(
+                MTU != 0 && MTU.is_multiple_of(16),
+                "MTU must be a non-zero multiple of 16"
+            )
+        };
+        init_rx_bds(&mut descriptors.0, buffers);
+        Self {
+            ring: &mut descriptors.0,
+            mtu: MTU,
+            index: 0,
+        }
+    }
+}
+
 impl ReceiveSlices<'_> {
     pub(crate) fn next_token<'a>(&'a mut self, ready: crate::RxReady<'a>) -> Option<RxToken<'a>> {
         self.next_impl(|rxbd| !rxbd.is_empty(), ready)
+    }
+}
+
+impl<'a> TransmitSlices<'a> {
+    /// Pair a descriptor ring with buffers for transmitting data.
+    #[must_use]
+    pub fn new<const N: usize, const MTU: usize>(
+        descriptors: &'a mut DescriptorRing<txbd::TxBD, N>,
+        buffers: &'a mut [DataBuffer<MTU>; N],
+    ) -> Self {
+        init_tx_bds(&mut descriptors.0, buffers);
+        Self {
+            ring: &mut descriptors.0,
+            mtu: MTU,
+            index: 0,
+        }
     }
 }
 
