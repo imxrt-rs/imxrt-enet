@@ -167,6 +167,13 @@ fn into_any<const N: u8>(inst: ral::enet::Instance<N>) -> AnyInstance {
     }
 }
 
+/// Maximum frame length for an Ethernet frame.
+///
+/// Measured from the destination MAC address and includes
+/// the FCS. Doesn't include VLAN tags. See the RCR docs
+/// for more info.
+const MAX_FRAME_LENGTH: usize = 1518;
+
 /// Ethernet MAC and related functions.
 ///
 /// The MDIO interface is always enabled. To generally use the MDIO interface,
@@ -237,8 +244,7 @@ impl Enet {
         ral::modify_reg!(ral::enet, enet, MSCR, HOLDTIME: hold_time, MII_SPEED: mii_speed);
 
         ral::modify_reg!(ral::enet, enet, RCR,
-            // Default max frame length without VLAN tags.
-            MAX_FL: 1518,
+            MAX_FL: MAX_FRAME_LENGTH as u32,
             // Since we're providing half-duplex control to the user, we
             // can't also enabled loopback.
             LOOP: 0,
@@ -271,6 +277,9 @@ impl Enet {
             // Default to 100Mbit/sec; users can throttle later.
             RMII_10T: 0,
         );
+        // Truncate frames longer than the maximum frame length.
+        // They'll fail the hardware CRC check.
+        ral::modify_reg!(ral::enet, enet, FTRL, TRUNC_FL: MAX_FRAME_LENGTH as u32);
 
         ral::modify_reg!(ral::enet, enet, TCR,
             // smoltcp is not including frame CRCs from software. Let
@@ -499,11 +508,18 @@ impl smoltcp::phy::Device for Enet {
     }
 
     fn capabilities(&self) -> smoltcp::phy::DeviceCapabilities {
-        let mtu = self.tx_ring.mtu().min(self.rx_ring.mtu());
-
         let mut caps = smoltcp::phy::DeviceCapabilities::default();
         caps.medium = smoltcp::phy::Medium::Ethernet;
-        caps.max_transmission_unit = mtu;
+
+        // smoltcp says it's the Ethernet frame contents minus the
+        // four octet FCS. However, we should also consider the sizes
+        // available in the user's buffers. We don't need to consider
+        // the FCS in the user's buffer, since we strip in the receive
+        // path and append (in hardware) in the transmit path.
+        caps.max_transmission_unit = (MAX_FRAME_LENGTH - 4)
+            .min(self.tx_ring.mtu())
+            .min(self.rx_ring.mtu());
+
         caps.max_burst_size = Some(self.tx_ring.len().min(self.rx_ring.len()));
 
         caps.checksum.ipv4 = smoltcp::phy::Checksum::None;

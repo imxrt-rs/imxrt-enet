@@ -44,6 +44,10 @@ impl<const N: usize> DescriptorRing<txbd::TxBD, N> {
 /// number of bytes that this single Ethernet frame could
 /// send. Usually, you'll place each `DataBuffer` in an
 /// array.
+///
+/// Internally, the driver may limit the maximum frame
+/// length. However, you're still required to maintain
+/// alignment and a "multiple of 16 bytes" size.
 #[repr(align(64))]
 pub struct DataBuffer<const MTU: usize>([u8; MTU]);
 
